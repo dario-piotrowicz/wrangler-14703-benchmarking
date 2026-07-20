@@ -53,7 +53,7 @@ jobs:
           echo "Dep count: $(echo $DEPS | wc -w | tr -d ' ')"
 
           if [ "${{ matrix.pkg-manager }}" = "npm" ]; then
-            npm install --save $DEPS
+            npm install --save --legacy-peer-deps $DEPS
           else
             pnpm add $DEPS
           fi
