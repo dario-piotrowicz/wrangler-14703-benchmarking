@@ -1,0 +1,293 @@
+name: Wrangler Lockfile Resolution Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Matrix benchmark job
+  # --------------------------------------------------------------------------
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        pkg-manager: [npm, pnpm]
+        dep-tier: [few, medium, lots]
+
+    runs-on: ${{ matrix.os }}
+    name: "${{ matrix.os }} / ${{ matrix.pkg-manager }} / ${{ matrix.dep-tier }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        if: matrix.pkg-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # -----------------------------------------------------------------------
+      # Install the dependency tier into worker/
+      # -----------------------------------------------------------------------
+      - name: Install dependency tier (${{ matrix.dep-tier }})
+        shell: bash
+        working-directory: worker
+        run: |
+          # Read the dep list for this tier from scripts/deps.json
+          DEPS=$(node -e "
+            const fs = require('fs');
+            const deps = JSON.parse(fs.readFileSync('../scripts/deps.json', 'utf-8'));
+            console.log(deps['${{ matrix.dep-tier }}'].join(' '));
+          ")
+
+          echo "Installing ${{ matrix.dep-tier }} tier dependencies..."
+          echo "Dep count: $(echo $DEPS | wc -w | tr -d ' ')"
+
+          if [ "${{ matrix.pkg-manager }}" = "npm" ]; then
+            npm install --save $DEPS
+          else
+            pnpm add $DEPS
+          fi
+
+      - name: Show dependency counts
+        shell: bash
+        working-directory: worker
+        run: |
+          echo "=== package.json dependencies ==="
+          node -e "
+            const pkg = require('./package.json');
+            const deps = Object.keys(pkg.dependencies || {}).length;
+            console.log('Direct dependencies:', deps);
+          "
+
+          if [ "${{ matrix.pkg-manager }}" = "npm" ]; then
+            echo "=== Lockfile: package-lock.json ==="
+            node -e "
+              const lock = require('./package-lock.json');
+              const count = Object.keys(lock.packages || {}).filter(k => k !== '').length;
+              console.log('Total resolved packages:', count);
+            "
+          else
+            echo "=== Lockfile: pnpm-lock.yaml ==="
+            echo "(pnpm lockfile present)"
+            ls -la pnpm-lock.yaml 2>/dev/null || echo "No pnpm-lock.yaml found"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Run the benchmark
+      # -----------------------------------------------------------------------
+      - name: Run benchmark
+        id: bench
+        shell: bash
+        working-directory: worker
+        run: |
+          # Run benchmark, capture JSON from stdout, logs go to stderr
+          RESULT=$(node ../scripts/benchmark.mjs --cwd . --trials 5)
+
+          # Save full JSON result to a file
+          echo "$RESULT" > ../benchmark-result.json
+
+          # Extract key metrics for step output
+          BASELINE_MEDIAN=$(echo "$RESULT" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
+              const r=JSON.parse(d);
+              console.log(r.stats.baseline.median.toFixed(1));
+            });
+          ")
+          BRANCH_MEDIAN=$(echo "$RESULT" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
+              const r=JSON.parse(d);
+              console.log(r.stats.branch.median.toFixed(1));
+            });
+          ")
+          SPEEDUP=$(echo "$RESULT" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
+              const r=JSON.parse(d);
+              console.log(r.speedup);
+            });
+          ")
+          DELTA_MEDIAN=$(echo "$RESULT" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
+              const r=JSON.parse(d);
+              console.log(r.paired_delta.median.toFixed(1));
+            });
+          ")
+
+          echo "baseline_median=$BASELINE_MEDIAN" >> "$GITHUB_OUTPUT"
+          echo "branch_median=$BRANCH_MEDIAN" >> "$GITHUB_OUTPUT"
+          echo "speedup=$SPEEDUP" >> "$GITHUB_OUTPUT"
+          echo "delta_median=$DELTA_MEDIAN" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Upload result artifact
+      # -----------------------------------------------------------------------
+      - name: Upload benchmark result
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.os }}-${{ matrix.pkg-manager }}-${{ matrix.dep-tier }}
+          path: benchmark-result.json
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # Per-job summary
+      # -----------------------------------------------------------------------
+      - name: Job summary
+        shell: bash
+        run: |
+          {
+            echo "## Benchmark: ${{ matrix.os }} / ${{ matrix.pkg-manager }} / ${{ matrix.dep-tier }}"
+            echo ""
+            echo "| Metric | baseline (main) | branch (#14703) |"
+            echo "|--------|-----------------|-----------------|"
+            echo "| Median | ${{ steps.bench.outputs.baseline_median }} ms | ${{ steps.bench.outputs.branch_median }} ms |"
+            echo ""
+            echo "**Speedup:** ${{ steps.bench.outputs.speedup }}x"
+            echo "**Paired delta median:** ${{ steps.bench.outputs.delta_median }} ms"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # Summary job: collect all results into one table
+  # --------------------------------------------------------------------------
+  summary:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    if: always()
+    name: Summary
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download all benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: result-*
+
+      - name: Generate summary report
+        shell: bash
+        run: |
+          node << 'SCRIPT'
+          const fs = require("fs");
+          const path = require("path");
+
+          const resultsDir = "results";
+          const rows = [];
+
+          // Walk the downloaded artifacts
+          for (const dir of fs.readdirSync(resultsDir)) {
+            const filePath = path.join(resultsDir, dir, "benchmark-result.json");
+            if (!fs.existsSync(filePath)) continue;
+
+            // Parse the artifact directory name: result-<os>-<pkg-manager>-<dep-tier>
+            const parts = dir.replace("result-", "").split("-");
+            // Handle os names like "ubuntu-latest", "macos-latest", "windows-latest"
+            // The format is: result-ubuntu-latest-npm-few
+            let os, pkgManager, depTier;
+            if (parts[0] === "ubuntu" || parts[0] === "macos" || parts[0] === "windows") {
+              os = parts[0] + "-" + parts[1];
+              pkgManager = parts[2];
+              depTier = parts[3];
+            } else {
+              // Fallback
+              os = dir;
+              pkgManager = "?";
+              depTier = "?";
+            }
+
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+              rows.push({
+                os,
+                pkgManager,
+                depTier,
+                baselineMedian: data.stats.baseline.median.toFixed(1),
+                branchMedian: data.stats.branch.median.toFixed(1),
+                baselineStddev: data.stats.baseline.stddev.toFixed(1),
+                branchStddev: data.stats.branch.stddev.toFixed(1),
+                speedup: data.speedup,
+                deltaMedian: data.paired_delta.median.toFixed(1),
+                node: data.environment.node,
+                cpu: data.environment.cpu,
+                ramGb: data.environment.ram_gb,
+              });
+            } catch (err) {
+              console.error("Failed to parse", filePath, err.message);
+            }
+          }
+
+          // Sort: by OS, then pkg manager, then dep tier order
+          const tierOrder = { few: 0, medium: 1, lots: 2 };
+          rows.sort((a, b) => {
+            if (a.os !== b.os) return a.os.localeCompare(b.os);
+            if (a.pkgManager !== b.pkgManager) return a.pkgManager.localeCompare(b.pkgManager);
+            return (tierOrder[a.depTier] ?? 99) - (tierOrder[b.depTier] ?? 99);
+          });
+
+          // Build markdown
+          let md = `# Wrangler Lockfile Resolution Benchmark Results\n\n`;
+          md += `Comparing \`wrangler@main\` (baseline) vs \`wrangler@14703\` (branch) across OS, package manager, and dependency count.\n\n`;
+          md += `| OS | Pkg Manager | Deps | Baseline Median | Branch Median | Speedup | Delta |\n`;
+          md += `|----|-------------|------|-----------------|---------------|---------|-------|\n`;
+
+          for (const r of rows) {
+            const speedupStr = r.speedup > 1.01
+              ? `**${r.speedup}x faster**`
+              : r.speedup < 0.99
+                ? `${(1 / r.speedup).toFixed(3)}x slower`
+                : `~same (${r.speedup}x)`;
+            md += `| ${r.os} | ${r.pkgManager} | ${r.depTier} | ${r.baselineMedian} ms (±${r.baselineStddev}) | ${r.branchMedian} ms (±${r.branchStddev}) | ${speedupStr} | ${r.deltaMedian} ms |\n`;
+          }
+
+          md += `\n### Environment Details\n\n`;
+
+          if (rows.length > 0) {
+            md += `| OS | CPU | RAM | Node |\n`;
+            md += `|----|-----|-----|------|\n`;
+            const seen = new Set();
+            for (const r of rows) {
+              const key = r.os;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              md += `| ${r.os} | ${r.cpu} | ${r.ramGb} GB | ${r.node} |\n`;
+            }
+          }
+
+          md += `\n### Interpretation\n\n`;
+          md += `- **Speedup > 1**: branch (#14703) is faster than baseline (main)\n`;
+          md += `- **Delta**: median of per-trial paired differences (branch - baseline). Negative = branch is faster.\n`;
+          md += `- Each cell ran 5 trials + 1 warmup, alternating execution order.\n`;
+
+          // Write to GITHUB_STEP_SUMMARY
+          const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+          if (summaryFile) {
+            fs.appendFileSync(summaryFile, md);
+          }
+
+          // Also print to stdout
+          console.log(md);
+
+          // Save as artifact
+          fs.writeFileSync("summary-report.md", md);
+          SCRIPT
+
+      - name: Upload summary report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: summary-report.md
+          retention-days: 30
