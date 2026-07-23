@@ -1,7 +1,7 @@
 /**
  * Benchmark runner for comparing wrangler deploy --dry-run performance.
  *
- * Runs two wrangler variants (baseline = main, branch = PR #14703) in
+ * Runs two wrangler variants (baseline = main, branch = PR #14819) in
  * alternating order with warmup, computes stats, and outputs results as JSON
  * to stdout for the CI workflow to consume.
  *
@@ -10,7 +10,7 @@
  *
  * Environment:
  *   WRANGLER_BASELINE_CMD  - command for baseline (default: npx https://pkg.pr.new/wrangler@main)
- *   WRANGLER_BRANCH_CMD    - command for branch   (default: npx https://pkg.pr.new/wrangler@14703)
+ *   WRANGLER_BRANCH_CMD    - command for branch   (default: npx https://pkg.pr.new/wrangler@14819)
  *
  * @module benchmark
  */
@@ -52,7 +52,7 @@ const BASELINE_CMD =
 	"npx https://pkg.pr.new/wrangler@main";
 const BRANCH_CMD =
 	process.env.WRANGLER_BRANCH_CMD ||
-	"npx https://pkg.pr.new/wrangler@14703";
+	"npx https://pkg.pr.new/wrangler@14819";
 
 const variants = {
 	baseline: `${BASELINE_CMD} deploy --dry-run`,

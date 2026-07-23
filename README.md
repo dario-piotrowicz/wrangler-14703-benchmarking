@@ -1,13 +1,13 @@
-# Wrangler Lockfile Resolution Benchmark
+# Wrangler Dependency Collection Caching Benchmark
 
-Benchmarks [PR #14703](https://github.com/cloudflare/workers-sdk/pull/14703) which changes wrangler to resolve dependency versions from lockfiles instead of walking `node_modules/`.
+Benchmarks [PR #14819](https://github.com/cloudflare/workers-sdk/pull/14819) which caches package dependency collection results to avoid redundant filesystem walks.
 
 ## What it measures
 
 Compares `wrangler deploy --dry-run` performance between:
 
-- **baseline** (`wrangler@main`) -- resolves versions by walking `node_modules/`
-- **branch** (`wrangler@14703`) -- resolves versions from lockfiles (`package-lock.json`, `pnpm-lock.yaml`)
+- **baseline** (`wrangler@main`) -- collects package dependencies on every deploy
+- **branch** (`wrangler@14819`) -- caches collected dependency results and reuses them when dependencies haven't changed
 
 ## Permutations
 

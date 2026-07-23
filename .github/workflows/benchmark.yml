@@ -1,4 +1,4 @@
-name: Wrangler Lockfile Resolution Benchmark
+name: Wrangler Dependency Collection Caching Benchmark
 
 on:
   workflow_dispatch:
@@ -146,7 +146,7 @@ jobs:
           {
             echo "## Benchmark: ${{ matrix.os }} / ${{ matrix.pkg-manager }} / ${{ matrix.dep-tier }}"
             echo ""
-            echo "| Metric | baseline (main) | branch (#14703) |"
+            echo "| Metric | baseline (main) | branch (#14819) |"
             echo "|--------|-----------------|-----------------|"
             echo "| Median | ${{ steps.bench.outputs.baseline_median }} ms | ${{ steps.bench.outputs.branch_median }} ms |"
             echo ""
@@ -239,8 +239,8 @@ jobs:
           });
 
           // Build markdown
-          let md = `# Wrangler Lockfile Resolution Benchmark Results\n\n`;
-          md += `Comparing \`wrangler@main\` (baseline) vs \`wrangler@14703\` (branch) across OS, package manager, and dependency count.\n\n`;
+          let md = `# Wrangler Dependency Collection Caching Benchmark Results\n\n`;
+          md += `Comparing \`wrangler@main\` (baseline) vs \`wrangler@14819\` (branch) across OS, package manager, and dependency count.\n\n`;
           md += `| OS | Pkg Manager | Deps | Baseline Median | Branch Median | Speedup | Delta |\n`;
           md += `|----|-------------|------|-----------------|---------------|---------|-------|\n`;
 
@@ -268,7 +268,7 @@ jobs:
           }
 
           md += `\n### Interpretation\n\n`;
-          md += `- **Speedup > 1**: branch (#14703) is faster than baseline (main)\n`;
+          md += `- **Speedup > 1**: branch (#14819) is faster than baseline (main)\n`;
           md += `- **Delta**: median of per-trial paired differences (branch - baseline). Negative = branch is faster.\n`;
           md += `- Each cell ran 5 trials + 1 warmup, alternating execution order.\n`;
 
