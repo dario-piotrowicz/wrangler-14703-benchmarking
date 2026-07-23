@@ -91,41 +91,26 @@ jobs:
         working-directory: worker
         run: |
           # Run benchmark, capture JSON from stdout, logs go to stderr
-          RESULT=$(node ../scripts/benchmark.mjs --cwd . --trials 5)
+          RESULT=$(node ../scripts/benchmark.mjs --cwd . --trials 5 --warm-runs 3)
 
           # Save full JSON result to a file
           echo "$RESULT" > ../benchmark-result.json
 
           # Extract key metrics for step output
-          BASELINE_MEDIAN=$(echo "$RESULT" | node -e "
-            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
-              const r=JSON.parse(d);
-              console.log(r.stats.baseline.median.toFixed(1));
-            });
-          ")
-          BRANCH_MEDIAN=$(echo "$RESULT" | node -e "
-            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
-              const r=JSON.parse(d);
-              console.log(r.stats.branch.median.toFixed(1));
-            });
-          ")
-          SPEEDUP=$(echo "$RESULT" | node -e "
-            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
-              const r=JSON.parse(d);
-              console.log(r.speedup);
-            });
-          ")
-          DELTA_MEDIAN=$(echo "$RESULT" | node -e "
-            let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
-              const r=JSON.parse(d);
-              console.log(r.paired_delta.median.toFixed(1));
-            });
-          ")
-
-          echo "baseline_median=$BASELINE_MEDIAN" >> "$GITHUB_OUTPUT"
-          echo "branch_median=$BRANCH_MEDIAN" >> "$GITHUB_OUTPUT"
-          echo "speedup=$SPEEDUP" >> "$GITHUB_OUTPUT"
-          echo "delta_median=$DELTA_MEDIAN" >> "$GITHUB_OUTPUT"
+          node -e "
+            const r = JSON.parse(process.argv[1]);
+            const lines = [
+              'baseline_cold_median=' + r.stats.baseline.cold.median.toFixed(1),
+              'baseline_warm_median=' + r.stats.baseline.warm.median.toFixed(1),
+              'branch_cold_median=' + r.stats.branch.cold.median.toFixed(1),
+              'branch_warm_median=' + r.stats.branch.warm.median.toFixed(1),
+              'warm_speedup=' + r.speedup.warm,
+              'cold_speedup=' + r.speedup.cold,
+              'branch_cache_speedup=' + r.speedup.branch_cache,
+              'delta_median=' + r.paired_delta.median.toFixed(1),
+            ];
+            lines.forEach(l => console.log(l));
+          " "$RESULT" >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
       # Upload result artifact
@@ -148,10 +133,13 @@ jobs:
             echo ""
             echo "| Metric | baseline (main) | branch (#14819) |"
             echo "|--------|-----------------|-----------------|"
-            echo "| Median | ${{ steps.bench.outputs.baseline_median }} ms | ${{ steps.bench.outputs.branch_median }} ms |"
+            echo "| Cold (1st deploy) | ${{ steps.bench.outputs.baseline_cold_median }} ms | ${{ steps.bench.outputs.branch_cold_median }} ms |"
+            echo "| Warm (2nd+ deploy) | ${{ steps.bench.outputs.baseline_warm_median }} ms | ${{ steps.bench.outputs.branch_warm_median }} ms |"
             echo ""
-            echo "**Speedup:** ${{ steps.bench.outputs.speedup }}x"
-            echo "**Paired delta median:** ${{ steps.bench.outputs.delta_median }} ms"
+            echo "**Warm speedup:** ${{ steps.bench.outputs.warm_speedup }}x"
+            echo "**Cold speedup:** ${{ steps.bench.outputs.cold_speedup }}x"
+            echo "**Branch cache benefit (cold vs warm):** ${{ steps.bench.outputs.branch_cache_speedup }}x"
+            echo "**Paired warm delta median:** ${{ steps.bench.outputs.delta_median }} ms"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # --------------------------------------------------------------------------
@@ -215,11 +203,15 @@ jobs:
                 os,
                 pkgManager,
                 depTier,
-                baselineMedian: data.stats.baseline.median.toFixed(1),
-                branchMedian: data.stats.branch.median.toFixed(1),
-                baselineStddev: data.stats.baseline.stddev.toFixed(1),
-                branchStddev: data.stats.branch.stddev.toFixed(1),
-                speedup: data.speedup,
+                baselineColdMedian: data.stats.baseline.cold.median.toFixed(1),
+                baselineWarmMedian: data.stats.baseline.warm.median.toFixed(1),
+                branchColdMedian: data.stats.branch.cold.median.toFixed(1),
+                branchWarmMedian: data.stats.branch.warm.median.toFixed(1),
+                baselineWarmStddev: data.stats.baseline.warm.stddev.toFixed(1),
+                branchWarmStddev: data.stats.branch.warm.stddev.toFixed(1),
+                warmSpeedup: data.speedup.warm,
+                coldSpeedup: data.speedup.cold,
+                branchCacheSpeedup: data.speedup.branch_cache,
                 deltaMedian: data.paired_delta.median.toFixed(1),
                 node: data.environment.node,
                 cpu: data.environment.cpu,
@@ -241,16 +233,34 @@ jobs:
           // Build markdown
           let md = `# Wrangler Dependency Collection Caching Benchmark Results\n\n`;
           md += `Comparing \`wrangler@main\` (baseline) vs \`wrangler@14819\` (branch) across OS, package manager, and dependency count.\n\n`;
-          md += `| OS | Pkg Manager | Deps | Baseline Median | Branch Median | Speedup | Delta |\n`;
-          md += `|----|-------------|------|-----------------|---------------|---------|-------|\n`;
+          md += `### Warm Runs (cached, 2nd+ deploy)\n\n`;
+          md += `This is the key comparison — warm runs show the cache benefit.\n\n`;
+          md += `| OS | Pkg Manager | Deps | Baseline Warm | Branch Warm | Warm Speedup | Cache Benefit | Delta |\n`;
+          md += `|----|-------------|------|---------------|-------------|--------------|---------------|-------|\n`;
 
           for (const r of rows) {
-            const speedupStr = r.speedup > 1.01
-              ? `**${r.speedup}x faster**`
-              : r.speedup < 0.99
-                ? `${(1 / r.speedup).toFixed(3)}x slower`
-                : `~same (${r.speedup}x)`;
-            md += `| ${r.os} | ${r.pkgManager} | ${r.depTier} | ${r.baselineMedian} ms (±${r.baselineStddev}) | ${r.branchMedian} ms (±${r.branchStddev}) | ${speedupStr} | ${r.deltaMedian} ms |\n`;
+            const warmStr = r.warmSpeedup > 1.01
+              ? `**${r.warmSpeedup}x faster**`
+              : r.warmSpeedup < 0.99
+                ? `${(1 / r.warmSpeedup).toFixed(3)}x slower`
+                : `~same (${r.warmSpeedup}x)`;
+            const cacheStr = r.branchCacheSpeedup > 1.01
+              ? `${r.branchCacheSpeedup}x`
+              : `~none (${r.branchCacheSpeedup}x)`;
+            md += `| ${r.os} | ${r.pkgManager} | ${r.depTier} | ${r.baselineWarmMedian} ms (±${r.baselineWarmStddev}) | ${r.branchWarmMedian} ms (±${r.branchWarmStddev}) | ${warmStr} | ${cacheStr} | ${r.deltaMedian} ms |\n`;
+          }
+
+          md += `\n### Cold Runs (1st deploy, no cache)\n\n`;
+          md += `| OS | Pkg Manager | Deps | Baseline Cold | Branch Cold | Cold Speedup |\n`;
+          md += `|----|-------------|------|---------------|-------------|-------------|\n`;
+
+          for (const r of rows) {
+            const coldStr = r.coldSpeedup > 1.01
+              ? `${r.coldSpeedup}x faster`
+              : r.coldSpeedup < 0.99
+                ? `${(1 / r.coldSpeedup).toFixed(3)}x slower`
+                : `~same (${r.coldSpeedup}x)`;
+            md += `| ${r.os} | ${r.pkgManager} | ${r.depTier} | ${r.baselineColdMedian} ms | ${r.branchColdMedian} ms | ${coldStr} |\n`;
           }
 
           md += `\n### Environment Details\n\n`;
@@ -268,9 +278,10 @@ jobs:
           }
 
           md += `\n### Interpretation\n\n`;
-          md += `- **Speedup > 1**: branch (#14819) is faster than baseline (main)\n`;
-          md += `- **Delta**: median of per-trial paired differences (branch - baseline). Negative = branch is faster.\n`;
-          md += `- Each cell ran 5 trials + 1 warmup, alternating execution order.\n`;
+          md += `- **Warm Speedup > 1**: branch (#14819) warm runs are faster than baseline (main) warm runs\n`;
+          md += `- **Cache Benefit**: how much faster the branch's warm runs are vs its own cold run (measures the caching effect)\n`;
+          md += `- **Delta**: median of per-trial paired warm differences (branch - baseline). Negative = branch is faster.\n`;
+          md += `- Each cell ran 5 trials. Each trial = 1 cold run + 3 warm runs per variant.\n`;
 
           // Write to GITHUB_STEP_SUMMARY
           const summaryFile = process.env.GITHUB_STEP_SUMMARY;
